@@ -26,51 +26,87 @@ const loadingIndicator = document.getElementById('loading');
 
 // Fetch road data from Overpass API near a click coordinate
 async function fetchRoadAt(lat, lng) {
+    if (loadingIndicator.style.display === 'block') return; // Prevent multiple simultaneous requests
+    
     loadingIndicator.style.display = 'block';
+    console.log(`Fetching road data for ${lat}, ${lng}...`);
     
     // Search radius in meters
     const radius = 20; 
     
     // Overpass QL query to find the nearest highway
     const query = `
-        [out:json][timeout:25];
+        [out:json][timeout:15];
         way(around:${radius},${lat},${lng})["highway"];
         out geom;
     `;
     
-    const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+    // List of common Overpass API endpoints to use as fallbacks
+    const endpoints = [
+        'https://overpass-api.de/api/interpreter',
+        'https://lz4.overpass-api.de/api/interpreter',
+        'https://z.overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter'
+    ];
+    
+    let fetched = false;
 
-    try {
-        const response = await fetch(url);
-        const data = await response.json();
+    for (const baseUrl of endpoints) {
+        if (fetched) break;
         
-        if (data.elements && data.elements.length > 0) {
-            // Pick the first way found
-            const way = data.elements[0];
-            const name = way.tags.name || way.tags.highway || 'Unnamed Road';
-            const coordinates = way.geometry.map(point => [point.lat, point.lon]);
+        const url = baseUrl + '?data=' + encodeURIComponent(query);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout for each attempt
+
+        try {
+            console.log(`Trying ${baseUrl}...`);
+            const response = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                console.warn(`${baseUrl} returned status ${response.status}`);
+                continue;
+            }
+
+            const data = await response.json();
+            console.log('Road data received:', data);
             
-            // Check if this road is already marked
-            let alreadyExists = false;
-            markedRoads.eachLayer(layer => {
-                if (layer.osmId === way.id) alreadyExists = true;
-            });
+            if (data.elements && data.elements.length > 0) {
+                // Pick the first way found
+                const way = data.elements[0];
+                const name = way.tags.name || way.tags.highway || 'Unnamed Road';
+                const coordinates = way.geometry.map(point => [point.lat, point.lon]);
+                
+                // Check if this road is already marked
+                let alreadyExists = false;
+                markedRoads.eachLayer(layer => {
+                    if (layer.osmId === way.id) alreadyExists = true;
+                });
 
             if (alreadyExists) {
+                loadingIndicator.style.display = 'none';
                 alert("This road is already marked!");
             } else {
                 addRoadToMap(coordinates, name, way.id);
                 saveRoads();
+                loadingIndicator.style.display = 'none';
             }
+            fetched = true;
         } else {
+            loadingIndicator.style.display = 'none';
             alert("No road found at this location. Try clicking closer to a road.");
+            fetched = true; // Still counts as a successful API call, just no results
         }
     } catch (error) {
-        console.error('Error fetching road data:', error);
-        alert("Failed to fetch road data. Please try again.");
-    } finally {
-        loadingIndicator.style.display = 'none';
+        console.warn(`${baseUrl} failed:`, error);
+        clearTimeout(timeoutId);
     }
+}
+
+if (!fetched) {
+    loadingIndicator.style.display = 'none';
+    alert("Failed to fetch road data from all providers. This could be due to a network error or the providers being temporarily unavailable.");
+}
 }
 
 function addRoadToMap(latlngs, name, osmId) {
